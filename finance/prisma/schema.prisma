@@ -1,0 +1,544 @@
+// ARTI FINANCE — database schema
+//
+// Conventions
+// - All money columns are INTEGER PAISE (₹1 = 100 paise). Never floats.
+// - Business calendar dates (schedule date, payment date, disbursement date)
+//   are `@db.Date` — a pure calendar date with no timezone. The business
+//   timezone (default Asia/Kolkata) is applied in application code when
+//   deciding "what is today".
+// - Moments in time (recordedAt, createdAt, audit timestamp) are timestamptz.
+// - Financial fact tables (Payment, Disbursement, PaymentAllocation,
+//   LedgerEntry, AuditLog) are append-only. Postgres triggers in the initial
+//   migration reject UPDATE/DELETE except for the narrow, one-way state
+//   transitions documented on each model (e.g. ACTIVE -> REVERSED).
+// - CHECK constraints and triggers that Prisma cannot express live in
+//   prisma/sql/invariants.sql and are appended to the initial migration.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ───────────────────────────── Enums ─────────────────────────────
+
+/// Only ADMIN accounts exist today and only ADMIN may use the application.
+/// OPERATOR / VIEWER are reserved so finer-grained roles can be added without a type migration.
+enum UserRole {
+  ADMIN
+  OPERATOR
+  VIEWER
+}
+
+enum PersonStatus {
+  ACTIVE
+  INACTIVE
+  COMPLETED
+  DEFAULTED
+}
+
+enum ContractStatus {
+  ACTIVE
+  COMPLETED
+  DEFAULTED
+  CANCELLED
+}
+
+enum AllocationPolicy {
+  OLDEST_FIRST // oldest outstanding -> current -> future -> unallocated credit
+}
+
+enum PaymentMethod {
+  CASH
+  UPI
+  BANK_TRANSFER
+  OTHER
+}
+
+enum TransactionStatus {
+  ACTIVE
+  REVERSED
+}
+
+// Stored coverage status of one scheduled collection day.
+// "Overpaid / advance" is NOT a stored status: an allocation can never exceed a
+// schedule's expected amount, so excess money lives either on a *future*
+// schedule (shown BLUE as advance) or as unallocated contract credit.
+enum ScheduleStatus {
+  PENDING // day still open (today/future) and not fully covered
+  PAID // fully covered by money dated on/before the day (includes prepaid future days)
+  PARTIAL // partly covered
+  MISSED // day closed with zero coverage
+  SETTLED_LATE // fully covered, but only by money dated AFTER the day (it was missed/short at close)
+  CANCELLED // contract cancelled while this future day was unpaid; no longer an obligation
+}
+
+enum AllocationTrigger {
+  PAYMENT_CREATED
+  PAYMENT_REVERSED
+  PAYMENT_CORRECTED
+  CONTRACT_CANCELLED
+  RECONCILIATION // only if a projection had drifted; normally reconciliation changes no allocations
+}
+
+enum LedgerEntryType {
+  DISBURSEMENT // money out to customer (negative)
+  DISBURSEMENT_REVERSAL // (positive)
+  COLLECTION // money in (positive)
+  COLLECTION_REVERSAL // (negative)
+  SCHEDULE_MISSED // memo: amount 0, memoAmount = shortfall at close
+}
+
+enum AuditAction {
+  PERSON_CREATED
+  PERSON_UPDATED
+  PERSON_DELETED
+  CONTRACT_CREATED
+  CONTRACT_UPDATED
+  CONTRACT_CANCELLED
+  CONTRACT_DEFAULTED
+  CONTRACT_COMPLETED
+  CONTRACT_REOPENED // a reversal made a COMPLETED contract owe money again
+  DISBURSEMENT_CREATED
+  DISBURSEMENT_REVERSED
+  PAYMENT_CREATED
+  PAYMENT_REVERSED
+  PAYMENT_CORRECTED
+  PAYMENT_ALLOCATED
+  PAYMENT_UNALLOCATED
+  SCHEDULE_MARKED_MISSED
+  RECONCILIATION_RUN
+  SETTINGS_UPDATED
+  LOGIN_SUCCESS
+  LOGIN_FAILED
+  LOGOUT
+  PASSWORD_CHANGED
+  ACCOUNT_CREATED
+  ACCOUNT_DISABLED
+  ACCOUNT_ENABLED
+}
+
+enum ReconciliationTrigger {
+  CRON
+  DASHBOARD
+  MANUAL
+}
+
+enum RunStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+// ───────────────────────────── Identity ─────────────────────────────
+
+model User {
+  id           String    @id @default(uuid(7)) @db.Uuid
+  /// Canonical Indian 10-digit mobile number (see lib/auth/mobile.ts). The login identifier.
+  mobileNumber String    @unique
+  passwordHash String /// Argon2id (PHC string). Never plaintext, never logged.
+  role         UserRole  @default(ADMIN)
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime? @db.Timestamptz(3)
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime  @updatedAt @db.Timestamptz(3)
+
+  sessions              Session[]
+  auditLogs             AuditLog[]
+  people                Person[]
+  contracts             Contract[]         @relation("ContractCreatedBy")
+  disbursements         Disbursement[]     @relation("DisbursementCreatedBy")
+  payments              Payment[]          @relation("PaymentCreatedBy")
+  reversals             Payment[]          @relation("PaymentReversedBy")
+  disbursementReversals Disbursement[]     @relation("DisbursementReversedBy")
+  cancelledContracts    Contract[]         @relation("ContractCancelledBy")
+  allocRuns             AllocationRun[]
+  settings              BusinessSettings[]
+
+  @@map("users")
+}
+
+/// Server-side session — the source of truth for whether a login is still valid.
+/// The Auth.js JWT cookie (encrypted, httpOnly) carries only a random session id;
+/// this table stores its SHA-256. Revoking the row signs the browser out immediately.
+model Session {
+  id            String    @id // sha256(token), hex
+  userId        String    @db.Uuid
+  createdAt     DateTime  @default(now()) @db.Timestamptz(3)
+  expiresAt     DateTime  @db.Timestamptz(3)
+  lastSeenAt    DateTime  @default(now()) @db.Timestamptz(3)
+  revokedAt     DateTime? @db.Timestamptz(3)
+  /// LOGOUT | PASSWORD_CHANGED | ACCOUNT_DISABLED
+  revokedReason String?
+  ipAddress     String?
+  userAgent     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+/// Login throttling that works on serverless (no in-memory state).
+model LoginAttempt {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  identifier String // normalised mobile number (or "invalid" when it didn't parse)
+  ipAddress  String?
+  succeeded  Boolean
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([identifier, createdAt])
+  @@index([ipAddress, createdAt])
+  @@map("login_attempts")
+}
+
+// ───────────────────────────── Customers ─────────────────────────────
+
+model Person {
+  id             String       @id @default(uuid(7)) @db.Uuid
+  slug           String       @unique // "dharmjit-pandey", "dharmjit-pandey-2" on collision
+  fullName       String
+  phoneNumber    String
+  alternatePhone String?
+  address        String?
+  notes          String?
+  status         PersonStatus @default(ACTIVE)
+  createdById    String       @db.Uuid
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime     @updatedAt @db.Timestamptz(3)
+  /// Soft delete only. A person with any financial history can never be hard-deleted (FK RESTRICT).
+  deletedAt      DateTime?    @db.Timestamptz(3)
+
+  createdBy     User           @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  contracts     Contract[]
+  disbursements Disbursement[]
+  payments      Payment[]
+  ledgerEntries LedgerEntry[]
+
+  @@index([phoneNumber])
+  @@index([fullName])
+  @@index([status])
+  @@map("people")
+}
+
+// ───────────────────────────── Contracts ─────────────────────────────
+
+/// Financial TERMS (amounts, day count, dates) are immutable after creation —
+/// enforced by trigger. Only status/notes/lifecycle timestamps may change.
+model Contract {
+  id                       String           @id @default(uuid(7)) @db.Uuid
+  /// Global sequence, displayed as "AF-0001".
+  contractNumber           Int              @unique @default(autoincrement())
+  personId                 String           @db.Uuid
+  principalAmount          Int // paise, agreed amount given
+  dailyCollectionAmount    Int // paise
+  totalCollectionDays      Int
+  expectedCollectionAmount Int // paise, = daily * days (CHECK)
+  startDate                DateTime         @db.Date
+  firstCollectionDate      DateTime         @db.Date
+  expectedEndDate          DateTime         @db.Date // = last scheduled collection date
+  allocationPolicy         AllocationPolicy @default(OLDEST_FIRST)
+  status                   ContractStatus   @default(ACTIVE)
+  statusReason             String?
+  notes                    String?
+  idempotencyKey           String           @unique
+  createdById              String           @db.Uuid
+  createdAt                DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt                DateTime         @updatedAt @db.Timestamptz(3)
+  completedAt              DateTime?        @db.Timestamptz(3)
+  cancelledAt              DateTime?        @db.Timestamptz(3)
+  cancelledById            String?          @db.Uuid
+  defaultedAt              DateTime?        @db.Timestamptz(3)
+
+  person         Person               @relation(fields: [personId], references: [id], onDelete: Restrict)
+  createdBy      User                 @relation("ContractCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  cancelledBy    User?                @relation("ContractCancelledBy", fields: [cancelledById], references: [id], onDelete: Restrict)
+  schedules      CollectionSchedule[]
+  disbursements  Disbursement[]
+  payments       Payment[]
+  allocations    PaymentAllocation[]
+  allocationRuns AllocationRun[]
+  ledgerEntries  LedgerEntry[]
+
+  /// Target for composite FKs so child rows can't point at a contract of a different person.
+  @@unique([id, personId])
+  @@index([personId])
+  @@index([status])
+  @@index([expectedEndDate])
+  @@map("contracts")
+}
+
+/// Principal given to the customer — its own auditable transaction.
+/// Immutable except the one-way ACTIVE -> REVERSED transition (trigger).
+model Disbursement {
+  id              String            @id @default(uuid(7)) @db.Uuid
+  contractId      String            @db.Uuid
+  personId        String            @db.Uuid
+  amount          Int // paise, > 0
+  disbursedOn     DateTime          @db.Date
+  method          PaymentMethod
+  referenceNumber String?
+  notes           String?
+  status          TransactionStatus @default(ACTIVE)
+  createdById     String            @db.Uuid
+  createdAt       DateTime          @default(now()) @db.Timestamptz(3)
+  reversedAt      DateTime?         @db.Timestamptz(3)
+  reversedById    String?           @db.Uuid
+  reversalReason  String?
+
+  contract      Contract      @relation(fields: [contractId, personId], references: [id, personId], onDelete: Restrict)
+  person        Person        @relation(fields: [personId], references: [id], onDelete: Restrict)
+  createdBy     User          @relation("DisbursementCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  reversedBy    User?         @relation("DisbursementReversedBy", fields: [reversedById], references: [id], onDelete: Restrict)
+  ledgerEntries LedgerEntry[]
+
+  @@index([contractId])
+  @@index([personId])
+  @@index([disbursedOn])
+  @@map("disbursements")
+}
+
+// ───────────────────────────── Schedule ─────────────────────────────
+
+/// One row per expected collection day. `expectedAmount`, `scheduledDate` and
+/// `sequence` are immutable. `allocatedAmount` and `status` are a PROJECTION of
+/// the active PaymentAllocation rows, rewritten in the same DB transaction as
+/// any allocation change, and verifiable at any time by recomputation.
+model CollectionSchedule {
+  id               String         @id @default(uuid(7)) @db.Uuid
+  contractId       String         @db.Uuid
+  sequence         Int // 1..totalCollectionDays
+  scheduledDate    DateTime       @db.Date
+  expectedAmount   Int // paise, >= 0
+  /// Spec name "collectedAmount": sum of ACTIVE allocations to this day (0..expected).
+  allocatedAmount  Int            @default(0)
+  status           ScheduleStatus @default(PENDING)
+  /// Set once, by reconciliation, when the day closed short. Never cleared —
+  /// this is what lets us show "MISSED originally, later SETTLED".
+  missedAt         DateTime?      @db.Timestamptz(3)
+  /// Shortfall at the moment the day closed (paise).
+  shortfallAtClose Int?
+  /// When the day first became fully covered.
+  settledAt        DateTime?      @db.Timestamptz(3)
+  /// Set once when the contract is cancelled and this (future, unpaid) day stops being due.
+  cancelledAt      DateTime?      @db.Timestamptz(3)
+  notes            String?
+  createdAt        DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime       @updatedAt @db.Timestamptz(3)
+
+  contract      Contract            @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  allocations   PaymentAllocation[]
+  ledgerEntries LedgerEntry[]
+
+  @@unique([contractId, sequence])
+  @@unique([contractId, scheduledDate])
+  @@unique([id, contractId])
+  @@index([scheduledDate, status])
+  @@index([status])
+  @@map("collection_schedules")
+}
+
+// ───────────────────────────── Payments ─────────────────────────────
+
+/// Money actually received. Immutable; the only permitted update is the one-way
+/// ACTIVE -> REVERSED transition setting reversedAt/reversedById/reversalReason.
+/// A correction = reversal of the original + a new Payment with correctsPaymentId.
+model Payment {
+  id                String            @id @default(uuid(7)) @db.Uuid
+  contractId        String            @db.Uuid
+  personId          String            @db.Uuid
+  amount            Int // paise, > 0
+  paymentDate       DateTime          @db.Date // business date the money was received
+  recordedAt        DateTime          @default(now()) @db.Timestamptz(3)
+  paymentMethod     PaymentMethod
+  referenceNumber   String?
+  notes             String?
+  status            TransactionStatus @default(ACTIVE)
+  /// Client-generated UUID per form submission; duplicate submits return the original.
+  idempotencyKey    String            @unique
+  createdById       String            @db.Uuid
+  reversedAt        DateTime?         @db.Timestamptz(3)
+  reversedById      String?           @db.Uuid
+  reversalReason    String?
+  /// Set on the replacement payment created by "Correct Payment".
+  correctsPaymentId String?           @unique @db.Uuid
+
+  contract      Contract            @relation(fields: [contractId, personId], references: [id, personId], onDelete: Restrict)
+  person        Person              @relation(fields: [personId], references: [id], onDelete: Restrict)
+  createdBy     User                @relation("PaymentCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  reversedBy    User?               @relation("PaymentReversedBy", fields: [reversedById], references: [id], onDelete: Restrict)
+  corrects      Payment?            @relation("PaymentCorrection", fields: [correctsPaymentId], references: [id], onDelete: Restrict)
+  correctedBy   Payment?            @relation("PaymentCorrection")
+  allocations   PaymentAllocation[]
+  ledgerEntries LedgerEntry[]
+  allocRuns     AllocationRun[]
+
+  @@unique([id, contractId])
+  @@index([contractId, status, paymentDate])
+  @@index([personId])
+  @@index([paymentDate])
+  @@index([referenceNumber])
+  @@map("payments")
+}
+
+/// One execution of the allocation engine for a contract. Groups the
+/// allocations created/voided together so the UI can explain *why* money moved.
+model AllocationRun {
+  id               String            @id @default(uuid(7)) @db.Uuid
+  contractId       String            @db.Uuid
+  trigger          AllocationTrigger
+  triggerPaymentId String?           @db.Uuid
+  policy           AllocationPolicy
+  createdCount     Int
+  voidedCount      Int
+  /// Human-readable breakdown, e.g. [{ scheduleDate, amount, paymentId }]
+  summary          Json
+  createdById      String?           @db.Uuid
+  createdAt        DateTime          @default(now()) @db.Timestamptz(3)
+
+  contract       Contract            @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  triggerPayment Payment?            @relation(fields: [triggerPaymentId], references: [id], onDelete: Restrict)
+  createdBy      User?               @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  created        PaymentAllocation[] @relation("AllocationCreatedRun")
+  voided         PaymentAllocation[] @relation("AllocationVoidedRun")
+
+  @@index([contractId, createdAt])
+  @@map("allocation_runs")
+}
+
+/// "₹750 of payment P covers schedule day S."
+/// Append-only; the only permitted update is setting voidedAt/voidedRunId once.
+/// Composite FKs guarantee payment, schedule and allocation share one contract.
+model PaymentAllocation {
+  id           String    @id @default(uuid(7)) @db.Uuid
+  contractId   String    @db.Uuid
+  paymentId    String    @db.Uuid
+  scheduleId   String    @db.Uuid
+  amount       Int // paise, > 0
+  createdRunId String    @db.Uuid
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
+  voidedAt     DateTime? @db.Timestamptz(3)
+  voidedRunId  String?   @db.Uuid
+  voidReason   String?
+
+  contract   Contract           @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  payment    Payment            @relation(fields: [paymentId, contractId], references: [id, contractId], onDelete: Restrict)
+  schedule   CollectionSchedule @relation(fields: [scheduleId, contractId], references: [id, contractId], onDelete: Restrict)
+  createdRun AllocationRun      @relation("AllocationCreatedRun", fields: [createdRunId], references: [id], onDelete: Restrict)
+  voidedRun  AllocationRun?     @relation("AllocationVoidedRun", fields: [voidedRunId], references: [id], onDelete: Restrict)
+
+  // Partial indexes on (scheduleId|paymentId) WHERE voidedAt IS NULL are added in invariants.sql.
+  @@index([contractId])
+  @@index([paymentId])
+  @@index([scheduleId])
+  @@map("payment_allocations")
+}
+
+// ───────────────────────────── Ledger & audit ─────────────────────────────
+
+/// Cash-movement journal from the lender's perspective (money out negative,
+/// money in positive). Append-only. Unique keys make writers idempotent.
+model LedgerEntry {
+  id             String          @id @default(uuid(7)) @db.Uuid
+  contractId     String          @db.Uuid
+  personId       String          @db.Uuid
+  entryType      LedgerEntryType
+  amount         Int // signed paise
+  /// SCHEDULE_MISSED only: the obligation left unpaid at close (paise, > 0).
+  memoAmount     Int?
+  effectiveDate  DateTime        @db.Date
+  description    String
+  paymentId      String?         @db.Uuid
+  disbursementId String?         @db.Uuid
+  scheduleId     String?         @db.Uuid
+  createdAt      DateTime        @default(now()) @db.Timestamptz(3)
+
+  contract     Contract            @relation(fields: [contractId, personId], references: [id, personId], onDelete: Restrict)
+  person       Person              @relation(fields: [personId], references: [id], onDelete: Restrict)
+  payment      Payment?            @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  disbursement Disbursement?       @relation(fields: [disbursementId], references: [id], onDelete: Restrict)
+  schedule     CollectionSchedule? @relation(fields: [scheduleId], references: [id], onDelete: Restrict)
+
+  @@unique([entryType, paymentId])
+  @@unique([entryType, disbursementId])
+  @@unique([entryType, scheduleId])
+  @@index([contractId, effectiveDate])
+  @@index([personId, effectiveDate])
+  @@index([effectiveDate])
+  @@map("ledger_entries")
+}
+
+/// Append-only (trigger rejects UPDATE and DELETE for every role the app uses).
+model AuditLog {
+  id          String      @id @default(uuid(7)) @db.Uuid
+  userId      String?     @db.Uuid // null for system jobs (cron reconciliation)
+  action      AuditAction
+  entityType  String // "Person" | "Contract" | "Payment" | ...
+  entityId    String
+  /// Denormalised for filtering the audit page by person/contract.
+  personId    String?     @db.Uuid
+  contractId  String?     @db.Uuid
+  description String
+  timestamp   DateTime    @default(now()) @db.Timestamptz(3)
+  ipAddress   String?
+  userAgent   String?
+  beforeData  Json?
+  afterData   Json?
+  metadata    Json?
+  /// Deterministic key for system events, e.g. "SCHEDULE_MARKED_MISSED:<scheduleId>",
+  /// so a re-run of reconciliation can never duplicate an entry.
+  dedupeKey   String?     @unique
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([timestamp])
+  @@index([entityType, entityId])
+  @@index([action, timestamp])
+  @@index([userId, timestamp])
+  @@index([personId, timestamp])
+  @@index([contractId, timestamp])
+  @@map("audit_logs")
+}
+
+// ───────────────────────────── Operations ─────────────────────────────
+
+model ReconciliationRun {
+  id                    String                @id @default(uuid(7)) @db.Uuid
+  trigger               ReconciliationTrigger
+  /// Last business date considered closed by this run.
+  closedThrough         DateTime              @db.Date
+  status                RunStatus             @default(RUNNING)
+  startedAt             DateTime              @default(now()) @db.Timestamptz(3)
+  finishedAt            DateTime?             @db.Timestamptz(3)
+  contractsChecked      Int                   @default(0)
+  schedulesMarkedMissed Int                   @default(0)
+  schedulesUpdated      Int                   @default(0)
+  contractsCompleted    Int                   @default(0)
+  error                 String?
+
+  @@index([startedAt])
+  @@map("reconciliation_runs")
+}
+
+/// Single-row settings table (id is always 1, CHECK-enforced).
+model BusinessSettings {
+  id                      Int              @id @default(1)
+  businessName            String           @default("ARTI FINANCE")
+  currency                String           @default("INR")
+  timezone                String           @default("Asia/Kolkata")
+  defaultPaymentMethod    PaymentMethod    @default(CASH)
+  /// Local wall-clock time ("HH:mm") at which a collection day closes.
+  dayCutoffTime           String           @default("23:59")
+  defaultAllocationPolicy AllocationPolicy @default(OLDEST_FIRST)
+  notificationPrefs       Json             @default("{}")
+  updatedAt               DateTime         @updatedAt @db.Timestamptz(3)
+  updatedById             String?          @db.Uuid
+
+  updatedBy User? @relation(fields: [updatedById], references: [id], onDelete: Restrict)
+
+  @@map("business_settings")
+}
