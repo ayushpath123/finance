@@ -50,14 +50,30 @@ export default async function HomePage() {
         </p>
       </section>
 
+      <Link
+        href="/settlements"
+        className={`flex items-center justify-between gap-3 rounded-2xl border p-4 hover:bg-muted/40 ${o.netPosition >= 0 ? "border-emerald-200 dark:border-emerald-900" : "border-amber-300 dark:border-amber-900"}`}
+      >
+        <span>
+          <span className="block text-xs font-medium tracking-wider text-muted-foreground uppercase">Net position</span>
+          <span className="block text-sm">
+            {o.netPosition > 0 ? "You will receive more than you pay" : o.netPosition < 0 ? "You have to pay more than you will receive" : "All square"}
+          </span>
+        </span>
+        <span className={`text-right text-2xl font-semibold ${o.netPosition >= 0 ? "text-emerald-700 dark:text-emerald-400" : "text-amber-700 dark:text-amber-400"}`}>
+          <Money value={Math.abs(o.netPosition)} />
+          <span className="block text-xs font-normal text-primary">Settlements →</span>
+        </span>
+      </Link>
+
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <Stat label="Missed outstanding" value={t.missed} tone={t.missed ? "danger" : undefined} hint={`${t.missedDays} day${t.missedDays === 1 ? "" : "s"}`} />
         <Stat label="Total outstanding" value={t.outstanding} />
         <Stat label="Prepaid future" value={t.prepaid} tone="info" />
-        <Link href="/short-term" className="rounded-xl outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+        <Link href="/lending" className="rounded-xl outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
           <Stat label="Short-term out" value={o.shortTerm.outstanding} hint={`${o.shortTerm.open} open · tap to view`} className="h-full hover:bg-muted/40" />
         </Link>
-        <Link href="/short-term?type=borrowed" className="rounded-xl outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+        <Link href="/borrowing" className="rounded-xl outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
           <Stat label="I owe (borrowed)" value={o.borrowed.outstanding} hint={`${o.borrowed.open} open · tap to view`} className="h-full hover:bg-muted/40" />
         </Link>
         {t.credit > 0 && <Stat label="Unallocated credit" value={t.credit} tone="info" />}

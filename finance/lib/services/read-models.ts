@@ -538,6 +538,8 @@ export async function getTodayOverview(opts: { now?: Date } = {}) {
     completedContracts: aggs.filter((a) => a.status === "COMPLETED").length,
     shortTerm: shortTermTotalsOf(openLoans),
     borrowed: shortTermTotalsOf(openLoans, "BORROWED"),
+    /** Owed to you (contracts + short-term lent) − what you owe (borrowed). Same definition as /settlements. */
+    netPosition: paise(totals.outstanding + shortTermTotalsOf(openLoans).outstanding - shortTermTotalsOf(openLoans, "BORROWED").outstanding),
     shortTermReceivedToday: paise(stReceivedToday._sum.amount ?? 0),
   };
 }

@@ -224,7 +224,7 @@ await step("Short-term shows on the person page, Home and the short-term list", 
   await go("/short-term");
   assert.match(await text("main"), new RegExp(NAME));
   await go("/dashboard");
-  assert.match(await text("main"), /Short-term out[\s\S]*I owe \(borrowed\)/);
+  assert.match(await text("main"), /NET POSITION[\s\S]*Short-term out[\s\S]*I owe \(borrowed\)/i);
 });
 
 await step("Borrowing: record money I borrowed from this person", async () => {
@@ -264,10 +264,22 @@ await step("Borrowing: paying it all back closes it", async () => {
   assert.match(await text("main"), /Paid back[\s\S]*₹26,000/);
 });
 
-await step("Short-term list separates what I lent from what I borrowed", async () => {
-  await go("/short-term?type=borrowed&show=closed");
+await step("Lending and Borrowing are separate pages; Settlements shows the net and who owes whom", async () => {
+  await go("/borrowing?show=closed");
+  assert.match(await text("main"), /Borrowing[\s\S]*YOU OWE/i);
   assert.match(await text("main"), new RegExp(NAME));
-  assert.match(await text("main"), /I lent[\s\S]*They owe me[\s\S]*I borrowed[\s\S]*I owe/);
+  await go("/lending");
+  assert.match(await text("main"), /Lending[\s\S]*THEY OWE YOU[\s\S]*Interest to earn/i);
+  await go("/short-term?type=borrowed"); // old link still works
+  assert.match(page.url(), /\/borrowing$/);
+  await go("/settlements");
+  const main = await text("main");
+  assert.match(main, /NET POSITION/i);
+  assert.match(main, /Owed to you[\s\S]*You owe/);
+  assert.match(main, /Who owes whom/);
+  assert.match(main, new RegExp(NAME));
+  await page.click("[role=tab]:has-text('I owe')");
+  await page.waitForURL(/who=i-owe/);
 });
 
 await step("search finds by mobile fragment and by contract number", async () => {
@@ -284,7 +296,7 @@ await step("Collect, Activity, More, Statement render", async () => {
   for (const [path, re] of [
     ["/collect", /Who is paying\?/],
     ["/activity", /Payment · /],
-    ["/more", /Short-term loans[\s\S]*Money I borrowed[\s\S]*Security[\s\S]*Users[\s\S]*Logout/],
+    ["/more", /Settlements[\s\S]*Lending[\s\S]*Borrowing[\s\S]*Security[\s\S]*Users[\s\S]*Logout/],
   ]) {
     await go(path);
     assert.match(await text("main"), re, path);
@@ -294,7 +306,7 @@ await step("Collect, Activity, More, Statement render", async () => {
 await step("no horizontal overflow at 360 / 390 / 430px", async () => {
   for (const width of [360, 390, 430]) {
     await page.setViewportSize({ width, height: 800 });
-    for (const path of ["/dashboard", "/people", "/collect", "/activity"]) {
+    for (const path of ["/dashboard", "/people", "/collect", "/activity", "/settlements", "/lending", "/borrowing"]) {
       await go(path);
       await noOverflow();
     }

@@ -21,6 +21,9 @@ export interface ShortTermLoanItem {
   totalDue: Paise;
   received: Paise;
   outstanding: Paise;
+  /** Split of what's still outstanding (money back pays principal first, then interest). */
+  principalOutstanding: Paise;
+  interestOutstanding: Paise;
   waived: Paise;
   givenOn: BusinessDate;
   closedOn: BusinessDate | null;
@@ -80,6 +83,8 @@ export async function shortTermLoans(
       totalDue: st.totalDue,
       received: st.received,
       outstanding: st.outstanding,
+      principalOutstanding: l.status === "OPEN" ? paise(st.principal - st.principalRecovered) : paise(0),
+      interestOutstanding: l.status === "OPEN" ? paise(st.outstanding - (st.principal - st.principalRecovered)) : paise(0),
       waived: st.waived,
       givenOn,
       closedOn,

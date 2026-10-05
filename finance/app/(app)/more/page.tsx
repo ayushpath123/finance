@@ -1,4 +1,4 @@
-import { ChevronRight, FileBarChart, KeyRound, LogOut, ScrollText, UserRound, Users, Wallet } from "lucide-react";
+import { ArrowDownLeft, ArrowUpRight, ChevronRight, FileBarChart, KeyRound, LogOut, Scale, ScrollText, UserRound, Users } from "lucide-react";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { logoutAction } from "@/app/actions/auth";
@@ -13,8 +13,9 @@ export default async function MorePage() {
     {
       title: "Money",
       items: [
-        { href: "/short-term", label: "Short-term loans", icon: Wallet, hint: "Money you lent — open and closed" },
-        { href: "/short-term?type=borrowed", label: "Money I borrowed", icon: Wallet, hint: "What you owe and have paid back" },
+        { href: "/settlements", label: "Settlements", icon: Scale, hint: "Net position — do you give or take more?" },
+        { href: "/lending", label: "Lending", icon: ArrowUpRight, hint: "Short-term money you gave" },
+        { href: "/borrowing", label: "Borrowing", icon: ArrowDownLeft, hint: "Money you owe and have paid back" },
       ],
     },
     {

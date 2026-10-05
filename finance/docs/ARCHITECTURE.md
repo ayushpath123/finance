@@ -396,6 +396,17 @@ The DB rejects a ledger entry whose type doesn't match the loan's direction, and
 
 ---
 
+## 15. Settlements, Lending, Borrowing pages
+
+- **/lending** and **/borrowing** — one shared layout (`components/short-term/book-page.tsx`): outstanding, principal
+  vs interest still due, this month's in/out, ageing buckets, open/closed lists. `/short-term` redirects here.
+- **/settlements** — net position = owed to you (daily contracts + short-term lent) − you owe (borrowed), interest
+  to earn vs pay, this month's money in/out, and "who owes whom" netted per person across both directions.
+- Maths in `lib/finance/settlement.ts` (pure, unit-tested); data in `lib/services/settlement-read.ts`, cross-checked
+  against the independent sources in `tests/integration/settlement.test.ts`. Read-only: no schema change.
+
+---
+
 ## 11. Commands
 
 ```

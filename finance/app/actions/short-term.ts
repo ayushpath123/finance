@@ -121,7 +121,7 @@ export async function reverseShortTermRepaymentAction(_prev: SimpleState, fd: Fo
   if (!parsed.success) return zodFailure(parsed.error);
   try {
     const r = await reverseShortTermRepayment(parsed.data, actor);
-    revalidatePath("/short-term", "layout");
+    revalidatePath("/", "layout");
     return { ok: true, message: r.reopened ? "Repayment reversed. The loan is open again." : "Repayment reversed." };
   } catch (err) {
     return failure(err, "reverse short-term repayment");
@@ -134,7 +134,7 @@ export async function cancelShortTermLoanAction(_prev: SimpleState, fd: FormData
   if (!parsed.success) return zodFailure(parsed.error);
   try {
     await cancelShortTermLoan(parsed.data, actor);
-    revalidatePath("/short-term", "layout");
+    revalidatePath("/", "layout");
     return { ok: true, message: "Loan cancelled." };
   } catch (err) {
     return failure(err, "cancel short-term loan");
