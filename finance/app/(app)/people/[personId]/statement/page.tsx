@@ -15,6 +15,14 @@ const TYPE_LABEL: Record<string, string> = {
   COLLECTION: "Payment received",
   COLLECTION_REVERSAL: "Payment reversed",
   SCHEDULE_MISSED: "Missed collection",
+  SHORT_TERM_GIVEN: "Short-term given",
+  SHORT_TERM_CANCELLED: "Short-term cancelled",
+  SHORT_TERM_REPAYMENT: "Short-term money back",
+  SHORT_TERM_REPAYMENT_REVERSAL: "Short-term repayment reversed",
+  BORROWING_RECEIVED: "Borrowed (money in)",
+  BORROWING_CANCELLED: "Borrowing cancelled",
+  BORROWING_REPAID: "Paid back to lender",
+  BORROWING_REPAID_REVERSAL: "Payment back reversed",
 };
 
 /** Chronological ledger for one person — every movement, straight from the append-only ledger. */

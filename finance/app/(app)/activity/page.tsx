@@ -28,12 +28,20 @@ export default async function ActivityPage({ searchParams }: PageProps<"/activit
       ) : (
         <ul className="divide-y rounded-2xl border bg-card">
           {items.map((t) => {
-            const inflow = t.kind === "PAYMENT";
+            const inflow = t.kind === "PAYMENT" || t.kind === "SHORT_TERM_REPAYMENT" || t.kind === "BORROWED";
             const reversed = t.status === "REVERSED";
             const date = t.kind === "PAYMENT" ? t.paymentDate : t.date;
+            const title = {
+              PAYMENT: "Payment",
+              DISBURSEMENT: "Principal given",
+              SHORT_TERM_GIVEN: "Short-term given",
+              SHORT_TERM_REPAYMENT: "Short-term repaid",
+              BORROWED: "Borrowed from",
+              BORROWING_REPAID: "Paid back to",
+            }[t.kind];
             return (
               <li key={`${t.kind}-${t.id}`}>
-                <Link href={`/contracts/${t.contractId}`} className="flex min-h-16 items-center gap-3 px-4 py-3 hover:bg-muted/40">
+                <Link href={t.href} className="flex min-h-16 items-center gap-3 px-4 py-3 hover:bg-muted/40">
                   <span
                     className={cn(
                       "flex size-9 shrink-0 items-center justify-center rounded-full",
@@ -45,7 +53,7 @@ export default async function ActivityPage({ searchParams }: PageProps<"/activit
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-medium">
-                      {inflow ? "Payment" : "Principal given"} · {t.person.fullName}
+                      {title} · {t.person.fullName}
                     </span>
                     <span className="block truncate text-xs text-muted-foreground">
                       {formatDayShort(date)} · {t.contractLabel} · {PAYMENT_METHOD_LABEL[t.method]}
@@ -59,7 +67,7 @@ export default async function ActivityPage({ searchParams }: PageProps<"/activit
                       signed
                       className={cn("font-semibold", inflow && "text-emerald-700", reversed && "text-muted-foreground line-through")}
                     />
-                    {reversed && <span className="block text-[11px] font-medium text-red-600">REVERSED</span>}
+                    {reversed && <span className="block text-[11px] font-medium text-red-600">{t.kind === "SHORT_TERM_GIVEN" || t.kind === "BORROWED" ? "CANCELLED" : "REVERSED"}</span>}
                   </span>
                 </Link>
               </li>

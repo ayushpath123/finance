@@ -90,6 +90,28 @@ enum LedgerEntryType {
   COLLECTION // money in (positive)
   COLLECTION_REVERSAL // (negative)
   SCHEDULE_MISSED // memo: amount 0, memoAmount = shortfall at close
+  SHORT_TERM_GIVEN // short-term loan money out (negative)
+  SHORT_TERM_CANCELLED // loan entered by mistake, reversed (positive)
+  SHORT_TERM_REPAYMENT // money back on a short-term loan (positive)
+  SHORT_TERM_REPAYMENT_REVERSAL // (negative)
+  BORROWING_RECEIVED // money borrowed from someone comes in (positive)
+  BORROWING_CANCELLED // borrowing entered by mistake, reversed (negative)
+  BORROWING_REPAID // money paid back to the lender (negative)
+  BORROWING_REPAID_REVERSAL // (positive)
+}
+
+/// Which way the money went. LENT: you gave it, it comes back to you.
+/// BORROWED: you received it, you pay it back. Never netted against each other.
+enum ShortTermDirection {
+  LENT
+  BORROWED
+}
+
+/// Short-term loans: lump sum out, a fixed interest amount, no schedule, no time limit.
+enum ShortTermLoanStatus {
+  OPEN // money (or part of it) still to come back
+  CLOSED // fully repaid, or settled for less (waivedAmount records the difference)
+  CANCELLED // entered by mistake; reversed in the ledger
 }
 
 enum AuditAction {
@@ -119,6 +141,12 @@ enum AuditAction {
   ACCOUNT_CREATED
   ACCOUNT_DISABLED
   ACCOUNT_ENABLED
+  SHORT_TERM_LOAN_CREATED
+  SHORT_TERM_LOAN_CLOSED
+  SHORT_TERM_LOAN_REOPENED // a repayment reversal made a closed loan owe money again
+  SHORT_TERM_LOAN_CANCELLED
+  SHORT_TERM_REPAYMENT_RECORDED
+  SHORT_TERM_REPAYMENT_REVERSED
 }
 
 enum ReconciliationTrigger {
@@ -146,17 +174,22 @@ model User {
   createdAt    DateTime  @default(now()) @db.Timestamptz(3)
   updatedAt    DateTime  @updatedAt @db.Timestamptz(3)
 
-  sessions              Session[]
-  auditLogs             AuditLog[]
-  people                Person[]
-  contracts             Contract[]         @relation("ContractCreatedBy")
-  disbursements         Disbursement[]     @relation("DisbursementCreatedBy")
-  payments              Payment[]          @relation("PaymentCreatedBy")
-  reversals             Payment[]          @relation("PaymentReversedBy")
-  disbursementReversals Disbursement[]     @relation("DisbursementReversedBy")
-  cancelledContracts    Contract[]         @relation("ContractCancelledBy")
-  allocRuns             AllocationRun[]
-  settings              BusinessSettings[]
+  sessions                Session[]
+  auditLogs               AuditLog[]
+  people                  Person[]
+  contracts               Contract[]           @relation("ContractCreatedBy")
+  disbursements           Disbursement[]       @relation("DisbursementCreatedBy")
+  payments                Payment[]            @relation("PaymentCreatedBy")
+  reversals               Payment[]            @relation("PaymentReversedBy")
+  disbursementReversals   Disbursement[]       @relation("DisbursementReversedBy")
+  cancelledContracts      Contract[]           @relation("ContractCancelledBy")
+  shortTermLoans          ShortTermLoan[]      @relation("ShortTermLoanCreatedBy")
+  shortTermLoansClosed    ShortTermLoan[]      @relation("ShortTermLoanClosedBy")
+  shortTermLoansCancelled ShortTermLoan[]      @relation("ShortTermLoanCancelledBy")
+  shortTermRepayments     ShortTermRepayment[] @relation("ShortTermRepaymentCreatedBy")
+  shortTermReversals      ShortTermRepayment[] @relation("ShortTermRepaymentReversedBy")
+  allocRuns               AllocationRun[]
+  settings                BusinessSettings[]
 
   @@map("users")
 }
@@ -213,11 +246,13 @@ model Person {
   /// Soft delete only. A person with any financial history can never be hard-deleted (FK RESTRICT).
   deletedAt      DateTime?    @db.Timestamptz(3)
 
-  createdBy     User           @relation(fields: [createdById], references: [id], onDelete: Restrict)
-  contracts     Contract[]
-  disbursements Disbursement[]
-  payments      Payment[]
-  ledgerEntries LedgerEntry[]
+  createdBy           User                 @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  contracts           Contract[]
+  disbursements       Disbursement[]
+  payments            Payment[]
+  ledgerEntries       LedgerEntry[]
+  shortTermLoans      ShortTermLoan[]
+  shortTermRepayments ShortTermRepayment[]
 
   @@index([phoneNumber])
   @@index([fullName])
@@ -438,34 +473,119 @@ model PaymentAllocation {
   @@map("payment_allocations")
 }
 
+// ───────────────────────────── Short-term loans ─────────────────────────────
+
+/// A lump sum given now, returned later with a FIXED interest amount agreed up front.
+/// No schedule, no daily obligations, no time limit. Terms are immutable (trigger);
+/// only the lifecycle (OPEN <-> CLOSED, OPEN -> CANCELLED) changes.
+/// The row itself is the disbursement transaction (ledger SHORT_TERM_GIVEN).
+model ShortTermLoan {
+  id              String              @id @default(uuid(7)) @db.Uuid
+  /// Global sequence, displayed as "ST-0001".
+  loanNumber      Int                 @unique @default(autoincrement())
+  personId        String              @db.Uuid
+  direction       ShortTermDirection  @default(LENT)
+  principalAmount Int // paise, > 0
+  interestAmount  Int // paise, >= 0 — the agreed amount, not a rate
+  givenOn         DateTime            @db.Date
+  method          PaymentMethod
+  referenceNumber String?
+  notes           String?
+  status          ShortTermLoanStatus @default(OPEN)
+  idempotencyKey  String              @unique
+  createdById     String              @db.Uuid
+  createdAt       DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime            @updatedAt @db.Timestamptz(3)
+  /// Set when CLOSED: business date of the closing repayment/settlement.
+  closedOn        DateTime?           @db.Date
+  closedAt        DateTime?           @db.Timestamptz(3)
+  closedById      String?             @db.Uuid
+  /// Settled for less: the part of principal + interest that was let go (paise, > 0).
+  waivedAmount    Int?
+  closeNote       String?
+  cancelledAt     DateTime?           @db.Timestamptz(3)
+  cancelledById   String?             @db.Uuid
+  cancelReason    String?
+
+  person        Person               @relation(fields: [personId], references: [id], onDelete: Restrict)
+  createdBy     User                 @relation("ShortTermLoanCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  closedBy      User?                @relation("ShortTermLoanClosedBy", fields: [closedById], references: [id], onDelete: Restrict)
+  cancelledBy   User?                @relation("ShortTermLoanCancelledBy", fields: [cancelledById], references: [id], onDelete: Restrict)
+  repayments    ShortTermRepayment[]
+  ledgerEntries LedgerEntry[]
+
+  @@unique([id, personId])
+  @@index([personId])
+  @@index([status])
+  @@index([direction, status])
+  @@map("short_term_loans")
+}
+
+/// Money received back on a short-term loan. Immutable except ACTIVE -> REVERSED.
+model ShortTermRepayment {
+  id              String            @id @default(uuid(7)) @db.Uuid
+  loanId          String            @db.Uuid
+  personId        String            @db.Uuid
+  amount          Int // paise, > 0
+  receivedOn      DateTime          @db.Date
+  recordedAt      DateTime          @default(now()) @db.Timestamptz(3)
+  method          PaymentMethod
+  referenceNumber String?
+  notes           String?
+  status          TransactionStatus @default(ACTIVE)
+  idempotencyKey  String            @unique
+  createdById     String            @db.Uuid
+  reversedAt      DateTime?         @db.Timestamptz(3)
+  reversedById    String?           @db.Uuid
+  reversalReason  String?
+
+  loan          ShortTermLoan @relation(fields: [loanId, personId], references: [id, personId], onDelete: Restrict)
+  person        Person        @relation(fields: [personId], references: [id], onDelete: Restrict)
+  createdBy     User          @relation("ShortTermRepaymentCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  reversedBy    User?         @relation("ShortTermRepaymentReversedBy", fields: [reversedById], references: [id], onDelete: Restrict)
+  ledgerEntries LedgerEntry[]
+
+  @@index([loanId, status])
+  @@index([personId])
+  @@index([receivedOn])
+  @@map("short_term_repayments")
+}
+
 // ───────────────────────────── Ledger & audit ─────────────────────────────
 
 /// Cash-movement journal from the lender's perspective (money out negative,
 /// money in positive). Append-only. Unique keys make writers idempotent.
+/// Every row belongs to exactly one of: a contract, or a short-term loan (CHECK-enforced).
 model LedgerEntry {
-  id             String          @id @default(uuid(7)) @db.Uuid
-  contractId     String          @db.Uuid
-  personId       String          @db.Uuid
-  entryType      LedgerEntryType
-  amount         Int // signed paise
+  id                   String          @id @default(uuid(7)) @db.Uuid
+  contractId           String?         @db.Uuid
+  personId             String          @db.Uuid
+  entryType            LedgerEntryType
+  amount               Int // signed paise
   /// SCHEDULE_MISSED only: the obligation left unpaid at close (paise, > 0).
-  memoAmount     Int?
-  effectiveDate  DateTime        @db.Date
-  description    String
-  paymentId      String?         @db.Uuid
-  disbursementId String?         @db.Uuid
-  scheduleId     String?         @db.Uuid
-  createdAt      DateTime        @default(now()) @db.Timestamptz(3)
+  memoAmount           Int?
+  effectiveDate        DateTime        @db.Date
+  description          String
+  paymentId            String?         @db.Uuid
+  disbursementId       String?         @db.Uuid
+  scheduleId           String?         @db.Uuid
+  shortTermLoanId      String?         @db.Uuid
+  shortTermRepaymentId String?         @db.Uuid
+  createdAt            DateTime        @default(now()) @db.Timestamptz(3)
 
-  contract     Contract            @relation(fields: [contractId, personId], references: [id, personId], onDelete: Restrict)
-  person       Person              @relation(fields: [personId], references: [id], onDelete: Restrict)
-  payment      Payment?            @relation(fields: [paymentId], references: [id], onDelete: Restrict)
-  disbursement Disbursement?       @relation(fields: [disbursementId], references: [id], onDelete: Restrict)
-  schedule     CollectionSchedule? @relation(fields: [scheduleId], references: [id], onDelete: Restrict)
+  contract           Contract?           @relation(fields: [contractId, personId], references: [id, personId], onDelete: Restrict)
+  shortTermLoan      ShortTermLoan?      @relation(fields: [shortTermLoanId, personId], references: [id, personId], onDelete: Restrict)
+  shortTermRepayment ShortTermRepayment? @relation(fields: [shortTermRepaymentId], references: [id], onDelete: Restrict)
+  person             Person              @relation(fields: [personId], references: [id], onDelete: Restrict)
+  payment            Payment?            @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  disbursement       Disbursement?       @relation(fields: [disbursementId], references: [id], onDelete: Restrict)
+  schedule           CollectionSchedule? @relation(fields: [scheduleId], references: [id], onDelete: Restrict)
 
   @@unique([entryType, paymentId])
   @@unique([entryType, disbursementId])
   @@unique([entryType, scheduleId])
+  @@unique([entryType, shortTermLoanId, shortTermRepaymentId])
+  @@index([shortTermLoanId])
   @@index([contractId, effectiveDate])
   @@index([personId, effectiveDate])
   @@index([effectiveDate])

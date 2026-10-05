@@ -142,3 +142,50 @@ export const settingsSchema = z.object({
   notificationPrefs: z.record(z.string(), z.unknown()).default({}),
 });
 export type SettingsInput = z.output<typeof settingsSchema>;
+
+// ─────────────────────────── Short-term loans ───────────────────────────
+
+const nonNegativeRupeesSchema = rupeesSchema.refine((p) => p <= MAX_ROW_PAISE, "Amount is too large");
+
+export const shortTermLoanInputSchema = z.object({
+  personId: z.uuid(),
+  /** LENT = you gave money; BORROWED = you received money and will pay it back. */
+  direction: z.enum(["LENT", "BORROWED"]).default("LENT"),
+  principalAmount: positiveRupeesSchema,
+  interestAmount: nonNegativeRupeesSchema,
+  givenOn: businessDateSchema,
+  method: paymentMethodSchema,
+  referenceNumber: optionalText(100),
+  notes: optionalText(2000),
+  idempotencyKey: idempotencyKeySchema,
+});
+export type ShortTermLoanInput = z.output<typeof shortTermLoanInputSchema>;
+
+export const shortTermRepaymentSchema = z.object({
+  loanId: z.uuid(),
+  amount: positiveRupeesSchema,
+  receivedOn: businessDateSchema,
+  method: paymentMethodSchema,
+  referenceNumber: optionalText(100),
+  notes: optionalText(2000),
+  idempotencyKey: idempotencyKeySchema,
+});
+export type ShortTermRepaymentInput = z.output<typeof shortTermRepaymentSchema>;
+
+/** Close now, taking `finalAmount` (may be ₹0) and letting any remainder go. */
+export const shortTermSettlementSchema = z.object({
+  loanId: z.uuid(),
+  finalAmount: nonNegativeRupeesSchema,
+  receivedOn: businessDateSchema,
+  method: paymentMethodSchema,
+  referenceNumber: optionalText(100),
+  note: optionalText(500),
+  idempotencyKey: idempotencyKeySchema,
+});
+export type ShortTermSettlementInput = z.output<typeof shortTermSettlementSchema>;
+
+export const shortTermRepaymentReversalSchema = z.object({ repaymentId: z.uuid(), reason: reasonSchema });
+export type ShortTermRepaymentReversalInput = z.output<typeof shortTermRepaymentReversalSchema>;
+
+export const shortTermCancellationSchema = z.object({ loanId: z.uuid(), reason: reasonSchema });
+export type ShortTermCancellationInput = z.output<typeof shortTermCancellationSchema>;

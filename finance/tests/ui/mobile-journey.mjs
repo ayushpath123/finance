@@ -52,6 +52,17 @@ const text = async (sel) => {
   return page.locator(sel).first().innerText();
 };
 
+// Dates relative to today in India, so the journey works on any day.
+const istToday = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
+const plusDays = (iso, n) => new Date(Date.parse(`${iso}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
+const human = (iso, year = true) =>
+  new Intl.DateTimeFormat("en-IN", { timeZone: "UTC", day: "numeric", month: "short", ...(year ? { year: "numeric" } : {}) })
+    .format(new Date(`${iso}T00:00:00Z`))
+    .replace("Sept", "Sep");
+const START = plusDays(istToday, -1);
+const FIRST = istToday;
+const FINAL = plusDays(FIRST, 99);
+
 const suffix = String(Date.now()).slice(-6);
 const NAME = `Journey Test ${suffix}`;
 const PHONE = `98${suffix}11`;
@@ -89,17 +100,17 @@ await step("Add Contract: person preselected, live calculation, review, create",
   await page.click("text=Add Contract");
   await page.waitForURL(/contracts\/new/);
   assert.match(await text("main"), new RegExp(NAME));
-  await page.fill("#start", "2026-09-26");
-  await page.fill("#first", "2026-09-27");
+  await page.fill("#start", START);
+  await page.fill("#first", FIRST);
   await page.fill("#principal", "50000");
   await page.fill("#daily", "750");
   await page.fill("#days", "100");
   const preview = await text("section[aria-live]");
   assert.match(preview, /₹75,000/);
   assert.match(preview, /₹25,000/);
-  assert.match(preview, /4 Jan 2027/);
+  assert.match(preview, new RegExp(human(FINAL)));
   await page.click("text=Review Contract");
-  assert.match(await text("main"), /Review Contract[\s\S]*₹50,000[\s\S]*4 Jan 2027/);
+  assert.match(await text("main"), new RegExp(`Review Contract[\\s\\S]*₹50,000[\\s\\S]*${human(FINAL)}`));
   await page.click("button:has-text('Create Contract')");
   await page.waitForSelector("text=Contract created");
   assert.match(await text("main"), /No payment has been recorded/);
@@ -115,8 +126,8 @@ await step("Record First Payment shows how the money was allocated", async () =>
   await page.waitForSelector("text=Payment recorded");
   const receipt = await text("main");
   assert.match(receipt, /Allocation/);
-  // First collection is today (27 Sep): ₹750 pays today, ₹750 prepays tomorrow.
-  assert.match(receipt, /Allocation[\s\S]*₹750[\s\S]*27 Sep collection[\s\S]*₹750[\s\S]*28 Sep prepaid/);
+  // First collection is today: ₹750 pays today, ₹750 prepays tomorrow.
+  assert.match(receipt, new RegExp(`Allocation[\\s\\S]*₹750[\\s\\S]*${human(FIRST, false)} collection[\\s\\S]*₹750[\\s\\S]*${human(plusDays(FIRST, 1), false)} prepaid`));
   assert.match(receipt, /₹75,000[\s\S]*₹73,500/);
 });
 
@@ -149,8 +160,114 @@ await step("person dashboard shows the full financial position", async () => {
   assert.match(main, /Activity[\s\S]*received/);
   await page.click("button[aria-label='More actions']");
   const items = (await page.locator("[role=menuitem]").allInnerTexts()).map((s) => s.trim());
-  assert.deepEqual(items, ["Edit Person", "Add Contract", "Record Payment", "View Transactions", "View Statement", "View Activity"]);
+  assert.deepEqual(items, ["Edit Person", "Add Contract", "Record Payment", "Give Short-term Loan", "I Borrowed Money", "View Transactions", "View Statement", "View Activity"]);
   await page.keyboard.press("Escape");
+});
+
+await step("Short-term: give money from the person page with a fixed interest amount", async () => {
+  await page.locator("main a:has-text('Short-term Loan')").first().click();
+  await page.waitForURL(/short-term\/new/);
+  await page.fill("#principal", "10000");
+  await page.fill("#interest", "500");
+  assert.match(await text("section[aria-live]"), /To come back[\s\S]*₹10,500/);
+  await page.click("button:has-text('Review')");
+  assert.match(await text("main"), /Time limit[\s\S]*None/);
+  await page.click("button:has-text('Record short-term loan')");
+  await page.waitForSelector("text=Short-term loan recorded");
+  await page.click("text=View loan");
+  await page.waitForURL(/\/short-term\/[0-9a-f-]{36}$/);
+  assert.match(await text("main"), /TO COME BACK[\s\S]*₹10,500/i);
+});
+
+await step("Short-term: part of the money comes back, loan stays open", async () => {
+  await page.fill("#amount", "4000");
+  assert.match(await text("main form"), /₹6,500 will still be outstanding/);
+  await page.click("button:has-text('Record ₹4,000')");
+  await page.waitForSelector("text=₹4,000 recorded");
+  await page.click("button:has-text('Done')");
+  await page.waitForFunction(() => /TO COME BACK\s*₹6,500/i.test(document.querySelector("main")?.innerText ?? ""));
+  assert.match(await text("main form"), /₹6,500 outstanding/);
+});
+
+await step("Short-term: settle & close for less records what was let go", async () => {
+  await page.click("[role=tab]:has-text('Settle & close')");
+  await page.fill("#amount", "6000");
+  assert.match(await text("main form"), /₹500 will be recorded as let go/);
+  assert.ok(await page.locator("button[type=submit]:has-text('Settle & close')").isDisabled(), "needs a reason when letting money go");
+  await page.fill("#notes", "Interest forgiven");
+  await page.click("button[type=submit]:has-text('Settle & close')");
+  await page.waitForSelector("text=The loan is now closed");
+  await page.click("button:has-text('Done')");
+  await page.waitForFunction(() => /\bCLOSED\b/.test(document.querySelector("main")?.innerText ?? ""));
+  const main = await text("main");
+  assert.match(main, /CLOSED/);
+  assert.match(main, /Let go[\s\S]*₹500/);
+});
+
+await step("Short-term: reversing a repayment reopens the loan", async () => {
+  await page.locator("section[aria-labelledby=rep-h] button:has-text('Reverse')").first().click();
+  await page.locator("[role=dialog] textarea").fill("Entered by mistake");
+  await page.click("[role=dialog] button:has-text('Reverse repayment')");
+  await page.waitForSelector("text=The loan is open again");
+  await page.waitForFunction(() => /TO COME BACK/i.test(document.querySelector("main")?.innerText ?? ""));
+  assert.match(await text("main"), /OPEN/);
+  assert.match(await text("main"), /REVERSED|line-through|Repayments/);
+});
+
+await step("Short-term shows on the person page, Home and the short-term list", async () => {
+  await go(`/people?q=${encodeURIComponent(NAME)}`);
+  await page.locator(`a:has-text("${NAME}")`).first().click();
+  await page.waitForURL(/\/people\/journey-test/);
+  const main = await text("main");
+  assert.match(main, /Short-term loans/);
+  assert.match(main, /short-term/i);
+  await go("/short-term");
+  assert.match(await text("main"), new RegExp(NAME));
+  await go("/dashboard");
+  assert.match(await text("main"), /Short-term out[\s\S]*I owe \(borrowed\)/);
+});
+
+await step("Borrowing: record money I borrowed from this person", async () => {
+  await go(`/people?q=${encodeURIComponent(NAME)}`);
+  await page.locator(`a:has-text("${NAME}")`).first().click();
+  await page.waitForURL(/\/people\/journey-test/);
+  await settled();
+  const before = (await text("main")).match(/TOTAL OUTSTANDING\s*(₹[\d,]+)/i)?.[1];
+  await page.click("button[aria-label='More actions']");
+  await page.click("[role=menuitem]:has-text('I Borrowed Money')");
+  await page.waitForURL(/borrowed\/new/);
+  await page.fill("#principal", "25000");
+  await page.fill("#interest", "1000");
+  assert.match(await text("section[aria-live]"), /To pay back[\s\S]*₹26,000/);
+  await page.click("button:has-text('Review')");
+  await page.click("button:has-text('Record borrowing')");
+  await page.waitForSelector("text=Borrowing recorded");
+  // The person page shows what I owe separately and does NOT reduce what they owe me.
+  await page.click("text=Back to");
+  await page.waitForURL(/\/people\/journey-test/);
+  await page.waitForFunction(() => /YOU OWE/i.test(document.querySelector("main")?.innerText ?? ""));
+  const main = await text("main");
+  assert.match(main, /YOU OWE[\s\S]*₹26,000/i);
+  assert.equal(main.match(/TOTAL OUTSTANDING\s*(₹[\d,]+)/i)?.[1], before);
+  assert.match(main, /Money I borrowed/);
+});
+
+await step("Borrowing: paying it all back closes it", async () => {
+  await page.locator("section[aria-labelledby=br-h] a[href^='/short-term/']").first().click();
+  await page.waitForURL(/\/short-term\/[0-9a-f-]{36}$/);
+  assert.match(await text("main"), /TO PAY BACK[\s\S]*₹26,000/i);
+  assert.match(await text("main form"), /This pays everything back/);
+  await page.click("main form button[type=submit]:has-text('Record ₹26,000')");
+  await page.waitForSelector("text=The loan is now closed");
+  await page.click("button:has-text('Done')");
+  await page.waitForFunction(() => /\bCLOSED\b/.test(document.querySelector("main")?.innerText ?? ""));
+  assert.match(await text("main"), /Paid back[\s\S]*₹26,000/);
+});
+
+await step("Short-term list separates what I lent from what I borrowed", async () => {
+  await go("/short-term?type=borrowed&show=closed");
+  assert.match(await text("main"), new RegExp(NAME));
+  assert.match(await text("main"), /I lent[\s\S]*They owe me[\s\S]*I borrowed[\s\S]*I owe/);
 });
 
 await step("search finds by mobile fragment and by contract number", async () => {
@@ -167,7 +284,7 @@ await step("Collect, Activity, More, Statement render", async () => {
   for (const [path, re] of [
     ["/collect", /Who is paying\?/],
     ["/activity", /Payment · /],
-    ["/more", /Security[\s\S]*Users[\s\S]*Logout/],
+    ["/more", /Short-term loans[\s\S]*Money I borrowed[\s\S]*Security[\s\S]*Users[\s\S]*Logout/],
   ]) {
     await go(path);
     assert.match(await text("main"), re, path);

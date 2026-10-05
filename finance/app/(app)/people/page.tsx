@@ -67,6 +67,8 @@ export default async function PeoplePage({ searchParams }: PageProps<"/people">)
                   <TableHead className="text-right">Principal given</TableHead>
                   <TableHead className="text-right">Contracted</TableHead>
                   <TableHead className="text-right">Collected</TableHead>
+                  <TableHead className="text-right">Short-term</TableHead>
+                  <TableHead className="text-right">I owe</TableHead>
                   <TableHead className="text-right">Outstanding</TableHead>
                   <TableHead className="text-right">Missed</TableHead>
                   <TableHead>Last payment</TableHead>
@@ -86,7 +88,9 @@ export default async function PeoplePage({ searchParams }: PageProps<"/people">)
                     <TableCell className="text-right"><Money value={p.totals.principalGiven} /></TableCell>
                     <TableCell className="text-right"><Money value={p.totals.contracted} /></TableCell>
                     <TableCell className="text-right"><Money value={p.totals.collected} /></TableCell>
-                    <TableCell className="text-right font-semibold"><Money value={p.totals.outstanding} /></TableCell>
+                    <TableCell className="text-right">{p.shortTerm.open ? <Money value={p.shortTerm.outstanding} /> : <span className="text-muted-foreground">—</span>}</TableCell>
+                    <TableCell className="text-right">{p.borrowed.open ? <Money value={p.borrowed.outstanding} className="text-amber-700" /> : <span className="text-muted-foreground">—</span>}</TableCell>
+                    <TableCell className="text-right font-semibold"><Money value={p.totalOutstanding} /></TableCell>
                     <TableCell className="text-right">
                       {p.totals.missed > 0 ? (
                         <span className="inline-flex items-center gap-1 text-red-600">

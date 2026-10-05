@@ -1,4 +1,4 @@
-import { ChevronRight, FileBarChart, KeyRound, LogOut, ScrollText, UserRound, Users } from "lucide-react";
+import { ChevronRight, FileBarChart, KeyRound, LogOut, ScrollText, UserRound, Users, Wallet } from "lucide-react";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { logoutAction } from "@/app/actions/auth";
@@ -10,6 +10,13 @@ export const metadata: Metadata = { title: "More" };
 export default async function MorePage() {
   const me = await requireAdmin();
   const groups = [
+    {
+      title: "Money",
+      items: [
+        { href: "/short-term", label: "Short-term loans", icon: Wallet, hint: "Money you lent — open and closed" },
+        { href: "/short-term?type=borrowed", label: "Money I borrowed", icon: Wallet, hint: "What you owe and have paid back" },
+      ],
+    },
     {
       title: "Account",
       items: [

@@ -7,6 +7,8 @@ import { fromDbDate, toDbDate, type BusinessDate } from "@/lib/finance/dates";
 import { paise, type Paise } from "@/lib/finance/money";
 import { toDisplayStatus, type ScheduleDisplayStatus, type ScheduleStatus } from "@/lib/finance/schedule-status";
 import { formatContractNumber } from "./contracts";
+import { formatShortTermNumber } from "./short-term";
+import { shortTermLoans, shortTermTotalsOf, type ShortTermLoanItem, type ShortTermTotals } from "./short-term-read";
 import { businessNow, getSettings, type BusinessNow } from "./settings";
 
 /**
@@ -228,6 +230,11 @@ export interface PersonListItem {
   phoneNumber: string;
   status: PersonStatus;
   totals: MoneyTotals;
+  shortTerm: ShortTermTotals;
+  /** Money YOU borrowed from this person and still have to pay back. Never netted with what they owe you. */
+  borrowed: ShortTermTotals;
+  /** Contracts + open short-term loans (what they owe you). */
+  totalOutstanding: Paise;
   paidToday: boolean;
   lastPaymentDate: BusinessDate | null;
 }
@@ -238,17 +245,25 @@ function parseContractNumber(q: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
+/** "ST-0003", "st3", "BR-0004" → number */
+function parseShortTermNumber(q: string): number | null {
+  const m = /^(?:st|br)-?\s*0*(\d{1,7})$/i.exec(q.trim());
+  return m ? Number(m[1]) : null;
+}
+
 export async function getPeopleDirectory(opts: { q?: string; now?: Date } = {}) {
   const bn = businessNow(await getSettings(), opts.now);
   const q = opts.q?.trim() ?? "";
   const digits = q.replace(/\D/g, "");
   const contractNo = q ? parseContractNumber(q) : null;
+  const shortTermNo = q ? parseShortTermNumber(q) : null;
 
   const or: Prisma.PersonWhereInput[] = [];
   if (q) {
     or.push({ fullName: { contains: q, mode: "insensitive" } });
     if (digits.length >= 3) or.push({ phoneNumber: { contains: digits } }, { alternatePhone: { contains: digits } });
     if (contractNo !== null) or.push({ contracts: { some: { contractNumber: contractNo } } });
+    if (shortTermNo !== null) or.push({ shortTermLoans: { some: { loanNumber: shortTermNo } } });
   }
 
   const people = await prisma.person.findMany({
@@ -257,21 +272,28 @@ export async function getPeopleDirectory(opts: { q?: string; now?: Date } = {}) 
     take: 200,
     select: { id: true, slug: true, fullName: true, phoneNumber: true, status: true },
   });
-  const aggs = await contractAggregates({ personIds: people.map((p) => p.id) }, bn);
+  const ids = people.map((p) => p.id);
+  const [aggs, loans] = await Promise.all([contractAggregates({ personIds: ids }, bn), shortTermLoans({ personIds: ids }, bn)]);
   const byPerson = groupBy(aggs, (a) => a.personId);
+  const loansByPerson = groupBy(loans, (l) => l.personId);
 
   const items: PersonListItem[] = people.map((p) => {
     const cs = byPerson.get(p.id) ?? [];
     const totals = totalsOf(cs);
+    const shortTerm = shortTermTotalsOf(loansByPerson.get(p.id) ?? []);
+    const borrowed = shortTermTotalsOf(loansByPerson.get(p.id) ?? [], "BORROWED");
     const last = cs.map((c) => c.lastPaymentDate).filter((d): d is BusinessDate => d !== null).sort().at(-1) ?? null;
     return {
       ...p,
       totals,
+      shortTerm,
+      borrowed,
+      totalOutstanding: paise(totals.outstanding + shortTerm.outstanding),
       paidToday: totals.todayExpected > 0 && totals.todayRemaining <= 0,
       lastPaymentDate: last,
     };
   });
-  return { bn, items, activeCount: items.filter((i) => i.totals.activeContracts > 0).length };
+  return { bn, items, activeCount: items.filter((i) => i.totals.activeContracts > 0 || i.shortTerm.open > 0 || i.borrowed.open > 0).length };
 }
 
 function groupBy<T>(list: readonly T[], key: (t: T) => string): Map<string, T[]> {
@@ -325,8 +347,9 @@ export async function getPersonDashboard(key: string, opts: { now?: Date } = {})
   const person = await findPerson(key);
   if (!person) return null;
   const bn = businessNow(await getSettings(), opts.now);
-  const [contracts, payments, activity] = await Promise.all([
+  const [contracts, loans, payments, activity] = await Promise.all([
     contractAggregates({ personIds: [person.id] }, bn),
+    shortTermLoans({ personIds: [person.id] }, bn),
     listPayments({ personId: person.id, take: 8 }),
     prisma.auditLog.findMany({
       where: { personId: person.id, action: { notIn: NOISY_ACTIONS } },
@@ -337,10 +360,20 @@ export async function getPersonDashboard(key: string, opts: { now?: Date } = {})
   ]);
   const order: Record<ContractStatus, number> = { ACTIVE: 0, DEFAULTED: 1, COMPLETED: 2, CANCELLED: 3 };
   contracts.sort((a, b) => order[a.status] - order[b.status] || b.contractNumber - a.contractNumber);
+  const totals = totalsOf(contracts);
+  const shortTerm = shortTermTotalsOf(loans);
+  const borrowed = shortTermTotalsOf(loans, "BORROWED");
+  const loanOrder: Record<ShortTermLoanItem["status"], number> = { OPEN: 0, CLOSED: 1, CANCELLED: 2 };
+  loans.sort((a, b) => loanOrder[a.status] - loanOrder[b.status] || b.loanNumber - a.loanNumber);
   return {
     bn,
     person,
-    totals: totalsOf(contracts),
+    totals,
+    shortTerm,
+    borrowed,
+    shortTermLoans: loans.filter((l) => l.direction === "LENT"),
+    borrowings: loans.filter((l) => l.direction === "BORROWED"),
+    totalOutstanding: paise(totals.outstanding + shortTerm.outstanding),
     contracts,
     payments,
     activity: activity.map(
@@ -481,10 +514,12 @@ export async function getContractDetail(contractId: string, opts: { now?: Date }
 
 export async function getTodayOverview(opts: { now?: Date } = {}) {
   const bn = businessNow(await getSettings(), opts.now);
-  const [aggs, receivedToday, people] = await Promise.all([
+  const [aggs, receivedToday, people, openLoans, stReceivedToday] = await Promise.all([
     contractAggregates({}, bn),
     prisma.payment.aggregate({ where: { status: "ACTIVE", paymentDate: toDbDate(bn.today) }, _sum: { amount: true }, _count: true }),
     prisma.person.findMany({ where: { deletedAt: null }, select: { id: true, slug: true, fullName: true, phoneNumber: true } }),
+    shortTermLoans({ status: "OPEN" }, bn),
+    prisma.shortTermRepayment.aggregate({ where: { status: "ACTIVE", receivedOn: toDbDate(bn.today), loan: { direction: "LENT" } }, _sum: { amount: true } }),
   ]);
   const personById = new Map(people.map((p) => [p.id, p]));
   const totals = totalsOf(aggs);
@@ -501,15 +536,33 @@ export async function getTodayOverview(opts: { now?: Date } = {}) {
     due,
     activePeople,
     completedContracts: aggs.filter((a) => a.status === "COMPLETED").length,
+    shortTerm: shortTermTotalsOf(openLoans),
+    borrowed: shortTermTotalsOf(openLoans, "BORROWED"),
+    shortTermReceivedToday: paise(stReceivedToday._sum.amount ?? 0),
   };
 }
 
 // ─────────────────────────── Activity (transactions) ───────────────────────────
 
 export type TransactionItem =
-  | ({ kind: "PAYMENT"; person: { slug: string; fullName: string } } & PaymentListItem)
+  | ({ kind: "PAYMENT"; href: string; person: { slug: string; fullName: string } } & PaymentListItem)
+  | {
+      kind: "SHORT_TERM_GIVEN" | "SHORT_TERM_REPAYMENT" | "BORROWED" | "BORROWING_REPAID";
+      href: string;
+      id: string;
+      amount: Paise;
+      date: BusinessDate;
+      recordedAt: Date;
+      method: PaymentMethod;
+      referenceNumber: string | null;
+      status: TransactionStatus;
+      contractLabel: string;
+      createdBy: string;
+      person: { slug: string; fullName: string };
+    }
   | {
       kind: "DISBURSEMENT";
+      href: string;
       id: string;
       amount: Paise;
       date: BusinessDate;
@@ -530,14 +583,23 @@ export async function getRecentTransactions(opts: { personId?: string; take?: nu
     createdBy: { select: { mobileNumber: true } },
     person: { select: { slug: true, fullName: true } },
   } as const;
-  const [payments, disbursements] = await Promise.all([
+  const stInclude = { createdBy: { select: { mobileNumber: true } }, person: { select: { slug: true, fullName: true } } } as const;
+  const [payments, disbursements, stLoans, stRepayments] = await Promise.all([
     prisma.payment.findMany({ where: { personId: opts.personId }, orderBy: { recordedAt: "desc" }, take, include }),
     prisma.disbursement.findMany({ where: { personId: opts.personId }, orderBy: { createdAt: "desc" }, take, include }),
+    prisma.shortTermLoan.findMany({ where: { personId: opts.personId }, orderBy: { createdAt: "desc" }, take, include: stInclude }),
+    prisma.shortTermRepayment.findMany({
+      where: { personId: opts.personId },
+      orderBy: { recordedAt: "desc" },
+      take,
+      include: { ...stInclude, loan: { select: { loanNumber: true, direction: true } } },
+    }),
   ]);
   const items: TransactionItem[] = [
     ...payments.map(
       (p): TransactionItem => ({
         kind: "PAYMENT",
+        href: `/contracts/${p.contractId}`,
         id: p.id,
         amount: paise(p.amount),
         paymentDate: fromDbDate(p.paymentDate),
@@ -555,6 +617,7 @@ export async function getRecentTransactions(opts: { personId?: string; take?: nu
     ...disbursements.map(
       (d): TransactionItem => ({
         kind: "DISBURSEMENT",
+        href: `/contracts/${d.contractId}`,
         id: d.id,
         amount: paise(d.amount),
         date: fromDbDate(d.disbursedOn),
@@ -568,6 +631,38 @@ export async function getRecentTransactions(opts: { personId?: string; take?: nu
         person: d.person,
       }),
     ),
+    ...stLoans.map(
+      (l): TransactionItem => ({
+        kind: l.direction === "BORROWED" ? "BORROWED" : "SHORT_TERM_GIVEN",
+        href: `/short-term/${l.id}`,
+        id: l.id,
+        amount: paise(l.principalAmount),
+        date: fromDbDate(l.givenOn),
+        recordedAt: l.createdAt,
+        method: l.method,
+        referenceNumber: l.referenceNumber,
+        status: l.status === "CANCELLED" ? "REVERSED" : "ACTIVE",
+        contractLabel: formatShortTermNumber(l.loanNumber, l.direction),
+        createdBy: l.createdBy.mobileNumber,
+        person: l.person,
+      }),
+    ),
+    ...stRepayments.map(
+      (r): TransactionItem => ({
+        kind: r.loan.direction === "BORROWED" ? "BORROWING_REPAID" : "SHORT_TERM_REPAYMENT",
+        href: `/short-term/${r.loanId}`,
+        id: r.id,
+        amount: paise(r.amount),
+        date: fromDbDate(r.receivedOn),
+        recordedAt: r.recordedAt,
+        method: r.method,
+        referenceNumber: r.referenceNumber,
+        status: r.status,
+        contractLabel: formatShortTermNumber(r.loan.loanNumber, r.loan.direction),
+        createdBy: r.createdBy.mobileNumber,
+        person: r.person,
+      }),
+    ),
   ];
   return items.sort((a, b) => b.recordedAt.getTime() - a.recordedAt.getTime()).slice(0, take);
 }
@@ -577,7 +672,7 @@ export async function getPersonLedger(personId: string) {
   const rows = await prisma.ledgerEntry.findMany({
     where: { personId },
     orderBy: [{ effectiveDate: "asc" }, { createdAt: "asc" }],
-    include: { contract: { select: { contractNumber: true } } },
+    include: { contract: { select: { contractNumber: true } }, shortTermLoan: { select: { loanNumber: true, direction: true } } },
   });
   return rows.map((r) => ({
     id: r.id,
@@ -586,8 +681,9 @@ export async function getPersonLedger(personId: string) {
     amount: paise(r.amount),
     memoAmount: r.memoAmount === null ? null : paise(r.memoAmount),
     description: r.description,
-    contractLabel: formatContractNumber(r.contract.contractNumber),
+    contractLabel: r.contract ? formatContractNumber(r.contract.contractNumber) : formatShortTermNumber(r.shortTermLoan!.loanNumber, r.shortTermLoan!.direction),
     contractId: r.contractId,
+    href: r.contractId ? `/contracts/${r.contractId}` : `/short-term/${r.shortTermLoanId}`,
   }));
 }
 

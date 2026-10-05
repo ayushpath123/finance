@@ -32,9 +32,17 @@ export function PersonCard({ person, href }: { person: PersonListItem; href?: st
         <div className="flex justify-between">
           <dt className="text-muted-foreground">Outstanding</dt>
           <dd className="font-semibold">
-            <Money value={t.outstanding} />
+            <Money value={person.totalOutstanding} />
           </dd>
         </div>
+        {person.shortTerm.open > 0 && (
+          <div className="flex justify-between">
+            <dt className="text-muted-foreground">incl. short-term</dt>
+            <dd>
+              <Money value={person.shortTerm.outstanding} />
+            </dd>
+          </div>
+        )}
         {t.todayExpected > 0 && (
           <div className="flex justify-between">
             <dt className="text-muted-foreground">Today&apos;s due</dt>
@@ -45,6 +53,11 @@ export function PersonCard({ person, href }: { person: PersonListItem; href?: st
         )}
       </dl>
 
+      {person.borrowed.open > 0 && (
+        <p className="mt-2 text-xs font-medium text-amber-800 dark:text-amber-300">
+          You owe them <Money value={person.borrowed.outstanding} />
+        </p>
+      )}
       {(t.missedDays > 0 || person.paidToday) && (
         <div className="mt-3 flex flex-wrap gap-2 text-xs font-medium">
           {t.missedDays > 0 && (

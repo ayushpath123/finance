@@ -36,6 +36,22 @@ export default async function CollectPage({ searchParams }: PageProps<"/collect"
     return (
       <div className="mx-auto max-w-lg">
         <PageHeader back={{ href: `/people/${data.person.slug}`, label: data.person.fullName }} title="Record Payment" />
+        {data.shortTermLoans.some((l) => l.status === "OPEN") && (
+          <div className="mb-4 space-y-2">
+            <p className="text-sm font-medium">Short-term money back</p>
+            {data.shortTermLoans
+              .filter((l) => l.status === "OPEN")
+              .map((l) => (
+                <Link key={l.id} href={`/short-term/${l.id}`} className="flex min-h-14 items-center justify-between rounded-xl border bg-card px-4 py-3 hover:bg-muted/40">
+                  <span className="font-medium">Short-term {l.label}</span>
+                  <span className="text-right text-sm">
+                    <span className="block text-xs text-muted-foreground">To come back</span>
+                    <Money value={l.outstanding} className="font-semibold" />
+                  </span>
+                </Link>
+              ))}
+          </div>
+        )}
         {payable.length === 0 ? (
           <div className="rounded-2xl border border-dashed p-6 text-center">
             <p className="font-medium">No open contracts</p>

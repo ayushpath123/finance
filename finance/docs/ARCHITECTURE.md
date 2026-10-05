@@ -351,6 +351,51 @@ pages are `Cache-Control: no-store` so Back after logout can't show cached data.
 
 ---
 
+## 13. Short-term loans
+
+A lump sum given now, returned later with a **fixed interest amount** agreed up front. No schedule, no daily
+obligations, no time limit — separate from contracts, but in the same ledger, audit log and person totals.
+
+| Step | What happens |
+|---|---|
+| Give money | `ShortTermLoan` row (terms immutable) + ledger `SHORT_TERM_GIVEN` (−principal) + audit |
+| Money back | `ShortTermRepayment` (one or many) + ledger `SHORT_TERM_REPAYMENT` (+amount). Never more than outstanding |
+| Fully back | Loan closes automatically (`CLOSED`, closedOn = repayment date, closedBy = admin) |
+| Settle & close | Close now taking a final amount (₹0 allowed); the shortfall is stored as `waivedAmount`, a note is required |
+| Mistake in a repayment | Reverse it (kept, `REVERSED`, ledger reversal). A closed loan reopens and its waiver is undone |
+| Loan entered by mistake | Cancel — only while nothing has been received; ledger `SHORT_TERM_CANCELLED` (+principal) |
+
+Outstanding = principal + interest − Σ active repayments (0 once closed/cancelled). Money back counts toward
+principal first, then interest. Person "Total Outstanding" = contracts + open short-term loans.
+
+**Database guarantees** (migration `20261005000000_short_term_loans`): positive amounts, immutable terms and
+repayments, no deletes, composite FK so a repayment can't name another person, each ledger row belongs to exactly
+one contract *or* one loan, and deferred COMMIT-time checks: never over-repaid, a fully repaid loan can't stay
+OPEN, a CLOSED loan's received + waived = due, a CANCELLED loan has no repayments. Rows are locked per loan, so two
+simultaneous repayments can't over-collect (tested).
+
+---
+
+## 14. Borrowings (money you owe)
+
+The same short-term engine with `direction = BORROWED`: someone lends **you** money, you pay back principal + a
+fixed interest amount, no time limit. Labels are `BR-0004` (lent loans stay `ST-0003`; one shared number sequence).
+
+| | Lent (`ST-`) | Borrowed (`BR-`) |
+|---|---|---|
+| Start | `SHORT_TERM_GIVEN` −principal | `BORROWING_RECEIVED` +principal |
+| Money back / paid back | `SHORT_TERM_REPAYMENT` + | `BORROWING_REPAID` − |
+| Reversal | `SHORT_TERM_REPAYMENT_REVERSAL` − | `BORROWING_REPAID_REVERSAL` + |
+| Cancel | `SHORT_TERM_CANCELLED` + | `BORROWING_CANCELLED` − |
+| Settle for less | you let it go | the lender let you off |
+
+**Never netted:** a person's Total Outstanding (what they owe you) excludes borrowings; "You owe them" is shown
+separately on the person page, the People list ("I owe" column), Home ("I owe (borrowed)") and the short-term list.
+The DB rejects a ledger entry whose type doesn't match the loan's direction, and `direction` is immutable
+(migration `20261006000000_borrowings`).
+
+---
+
 ## 11. Commands
 
 ```
@@ -358,7 +403,7 @@ npm run typecheck && npm test    # types + unit tests (finance, auth, routing)
 TEST_DATABASE_URL=… npm run test:integration   # DROPS that DB's public schema, migrates, runs ledger + auth E2E
 npm run build && npm run security:scan         # production build, then prove no secrets reach the browser
 E2E_BASE_URL=http://localhost:3000 npm run test:e2e   # HTTP flows against a running `next start` (same DATABASE_URL)
-UI_BASE_URL=http://localhost:3000 UI_MOBILE=… UI_PASSWORD=… npm run test:ui   # real-browser mobile journey (creates one test person)
+UI_BASE_URL=http://localhost:3000 UI_MOBILE=… UI_PASSWORD=… npm run test:ui   # real-browser mobile journey incl. short-term (creates one test person)
 npm run db:migrate               # prisma migrate deploy
 npm run db:seed                  # create the initial administrators from INITIAL_ADMIN_* (idempotent)
 npm run db:seed:demo             # demo customers/contracts — development only

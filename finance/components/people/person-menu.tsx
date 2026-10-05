@@ -1,6 +1,6 @@
 "use client";
 
-import { Activity, FileText, HandCoins, MoreVertical, Pencil, Plus, ReceiptText } from "lucide-react";
+import { Activity, ArrowDownToLine, FileText, HandCoins, MoreVertical, Pencil, Plus, ReceiptText, Wallet } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -10,6 +10,8 @@ export function PersonMenu({ slug }: { slug: string }) {
     { href: `/people/${slug}/edit`, label: "Edit Person", icon: Pencil },
     { href: `/people/${slug}/contracts/new`, label: "Add Contract", icon: Plus },
     { href: `/collect?person=${slug}`, label: "Record Payment", icon: HandCoins },
+    { href: `/people/${slug}/short-term/new`, label: "Give Short-term Loan", icon: Wallet },
+    { href: `/people/${slug}/borrowed/new`, label: "I Borrowed Money", icon: ArrowDownToLine },
     { sep: true },
     { href: `/activity?person=${slug}`, label: "View Transactions", icon: ReceiptText },
     { href: `/people/${slug}/statement`, label: "View Statement", icon: FileText },

@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, Loader2, Plus, UserRound } from "lucide-react";
+import { CheckCircle2, Loader2, Plus, UserRound, Wallet } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useActionState, useEffect } from "react";
@@ -61,6 +61,11 @@ export function PersonForm({
             </Link>
           </Button>
           <Button asChild variant="outline" className="h-12 rounded-xl">
+            <Link href={`/people/${state.person.slug}/short-term/new`}>
+              <Wallet aria-hidden /> Give Short-term Loan
+            </Link>
+          </Button>
+          <Button asChild variant="ghost" className="h-12 rounded-xl">
             <Link href={`/people/${state.person.slug}`}>
               <UserRound aria-hidden /> View Person
             </Link>

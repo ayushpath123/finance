@@ -61,3 +61,31 @@ export async function checkContractIntegrity(contractId: string, opts: { now?: D
   });
   return issues;
 }
+
+/** Ledger ↔ transaction parity for one short-term loan (balance rules are DB-enforced at commit). */
+export async function checkShortTermIntegrity(loanId: string): Promise<IntegrityIssue[]> {
+  const issues: IntegrityIssue[] = [];
+  const [loan, repayments, ledger] = await Promise.all([
+    prisma.shortTermLoan.findUniqueOrThrow({ where: { id: loanId } }),
+    prisma.shortTermRepayment.findMany({ where: { loanId } }),
+    prisma.ledgerEntry.findMany({ where: { shortTermLoanId: loanId } }),
+  ]);
+  const of = (type: string, repaymentId: string | null) => ledger.filter((l) => l.entryType === type && l.shortTermRepaymentId === repaymentId);
+  // Lent: money out −, back +.  Borrowed: money in +, paid back −.
+  const t =
+    loan.direction === "BORROWED"
+      ? { start: "BORROWING_RECEIVED", cancel: "BORROWING_CANCELLED", repay: "BORROWING_REPAID", reverse: "BORROWING_REPAID_REVERSAL", sign: 1 }
+      : { start: "SHORT_TERM_GIVEN", cancel: "SHORT_TERM_CANCELLED", repay: "SHORT_TERM_REPAYMENT", reverse: "SHORT_TERM_REPAYMENT_REVERSAL", sign: -1 };
+  const start = of(t.start, null);
+  if (start.length !== 1 || start[0].amount !== t.sign * loan.principalAmount) issues.push({ contractId: loanId, problem: `missing/incorrect ${t.start} entry` });
+  if (of(t.cancel, null).length !== (loan.status === "CANCELLED" ? 1 : 0)) issues.push({ contractId: loanId, problem: "cancellation ledger mismatch" });
+  for (const r of repayments) {
+    const back = of(t.repay, r.id);
+    if (back.length !== 1 || back[0].amount !== -t.sign * r.amount) issues.push({ contractId: loanId, problem: `repayment ${r.id} has no matching ledger entry` });
+    if (of(t.reverse, r.id).length !== (r.status === "REVERSED" ? 1 : 0)) issues.push({ contractId: loanId, problem: `repayment ${r.id} reversal ledger mismatch` });
+  }
+  if (ledger.some((l) => !l.entryType.startsWith(loan.direction === "BORROWED" ? "BORROWING_" : "SHORT_TERM_"))) {
+    issues.push({ contractId: loanId, problem: "ledger entry of the wrong direction" });
+  }
+  return issues;
+}

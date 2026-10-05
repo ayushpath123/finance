@@ -14,12 +14,20 @@ const ICON: Partial<Record<AuditAction, typeof Wallet>> = {
   SCHEDULE_MARKED_MISSED: AlertCircle,
   CONTRACT_CANCELLED: Ban,
   CONTRACT_COMPLETED: CheckCircle2,
+  SHORT_TERM_LOAN_CREATED: Wallet,
+  SHORT_TERM_REPAYMENT_RECORDED: HandCoins,
+  SHORT_TERM_REPAYMENT_REVERSED: RotateCcw,
+  SHORT_TERM_LOAN_CLOSED: CheckCircle2,
+  SHORT_TERM_LOAN_REOPENED: RotateCcw,
+  SHORT_TERM_LOAN_CANCELLED: Ban,
 };
 
 const TONE: Partial<Record<AuditAction, string>> = {
   SCHEDULE_MARKED_MISSED: "text-red-600 bg-red-50 dark:bg-red-950",
   PAYMENT_CREATED: "text-emerald-700 bg-emerald-50 dark:bg-emerald-950",
   CONTRACT_COMPLETED: "text-sky-700 bg-sky-50 dark:bg-sky-950",
+  SHORT_TERM_REPAYMENT_RECORDED: "text-emerald-700 bg-emerald-50 dark:bg-emerald-950",
+  SHORT_TERM_LOAN_CLOSED: "text-sky-700 bg-sky-50 dark:bg-sky-950",
   PAYMENT_REVERSED: "text-amber-700 bg-amber-50 dark:bg-amber-950",
 };
 

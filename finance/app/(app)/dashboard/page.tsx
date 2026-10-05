@@ -54,7 +54,13 @@ export default async function HomePage() {
         <Stat label="Missed outstanding" value={t.missed} tone={t.missed ? "danger" : undefined} hint={`${t.missedDays} day${t.missedDays === 1 ? "" : "s"}`} />
         <Stat label="Total outstanding" value={t.outstanding} />
         <Stat label="Prepaid future" value={t.prepaid} tone="info" />
-        <Stat label="Unallocated credit" value={t.credit} tone={t.credit ? "info" : "muted"} />
+        <Link href="/short-term" className="rounded-xl outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+          <Stat label="Short-term out" value={o.shortTerm.outstanding} hint={`${o.shortTerm.open} open · tap to view`} className="h-full hover:bg-muted/40" />
+        </Link>
+        <Link href="/short-term?type=borrowed" className="rounded-xl outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+          <Stat label="I owe (borrowed)" value={o.borrowed.outstanding} hint={`${o.borrowed.open} open · tap to view`} className="h-full hover:bg-muted/40" />
+        </Link>
+        {t.credit > 0 && <Stat label="Unallocated credit" value={t.credit} tone="info" />}
         <Stat label="Principal given" value={t.principalGiven} />
         <Stat label="Contracted" value={t.contracted} />
         <Stat label="Total collected" value={t.collected} tone="success" />

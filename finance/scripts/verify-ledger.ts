@@ -6,7 +6,8 @@ import "./load-env";
 import { prisma } from "@/lib/db/client";
 import { formatINR, paise } from "@/lib/finance/money";
 import { formatContractNumber } from "@/lib/services/contracts";
-import { checkContractIntegrity } from "@/lib/services/integrity";
+import { checkContractIntegrity, checkShortTermIntegrity } from "@/lib/services/integrity";
+import { formatShortTermNumber } from "@/lib/services/short-term";
 import { getContractSummary } from "@/lib/services/read-models";
 
 async function main() {
@@ -34,8 +35,16 @@ async function main() {
       ].join(" "),
     );
   }
+  const loans = await prisma.shortTermLoan.findMany({ orderBy: { loanNumber: "asc" }, include: { person: { select: { fullName: true } } } });
+  for (const l of loans) {
+    const issues = await checkShortTermIntegrity(l.id);
+    problems += issues.length;
+    console.log(
+      `${formatShortTermNumber(l.loanNumber, l.direction).padEnd(8)} ${l.person.fullName.padEnd(18)} ${l.status.padEnd(10)} given ${formatINR(paise(l.principalAmount))} + ${formatINR(paise(l.interestAmount))} interest${issues.length ? `  ✗ ${issues.map((i) => i.problem).join("; ")}` : "  ✓"}`,
+    );
+  }
   const totals = await prisma.ledgerEntry.aggregate({ _sum: { amount: true } });
-  console.log(`\n${contracts.length} contracts, ${problems} issue(s). Net ledger cash: ${formatINR(paise(totals._sum.amount ?? 0))}`);
+  console.log(`\n${contracts.length} contracts, ${loans.length} short-term loans/borrowings, ${problems} issue(s). Net ledger cash: ${formatINR(paise(totals._sum.amount ?? 0))}`);
   process.exit(problems ? 1 : 0);
 }
 
